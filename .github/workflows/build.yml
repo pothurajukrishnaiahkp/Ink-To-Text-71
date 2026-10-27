@@ -1,0 +1,810 @@
+name: Build Smart Blackboard APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle 8.4
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.4'
+
+      - name: Generate Android Project Structure
+        run: |
+          mkdir -p app/src/main/java/com/krish/smartboard
+          mkdir -p app/src/main/res/values
+
+          cat << 'EOF' > settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "SmartBlackboard"
+          include ':app'
+          EOF
+
+          cat << 'EOF' > build.gradle
+          plugins {
+              id 'com.android.application' version '8.2.0' apply false
+          }
+          EOF
+
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          EOF
+
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.krish.smartboard'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.krish.smartboard"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  debug {
+                      minifyEnabled false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'com.google.mlkit:digital-ink-recognition:18.1.0'
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="KRISH Smart Board"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:screenOrientation="sensorLandscape"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/krish/smartboard/MainActivity.java
+          package com.krish.smartboard;
+
+          import android.Manifest;
+          import android.content.ActivityNotFoundException;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.graphics.Canvas;
+          import android.graphics.Color;
+          import android.graphics.DashPathEffect;
+          import android.graphics.Paint;
+          import android.graphics.Path;
+          import android.graphics.RectF;
+          import android.graphics.Typeface;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.speech.RecognizerIntent;
+          import android.text.InputType;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.HorizontalScrollView;
+          import android.widget.LinearLayout;
+          import android.widget.Toast;
+
+          import androidx.appcompat.app.AlertDialog;
+          import androidx.appcompat.app.AppCompatActivity;
+          import androidx.core.app.ActivityCompat;
+          import androidx.core.content.ContextCompat;
+
+          import com.google.mlkit.common.model.DownloadConditions;
+          import com.google.mlkit.common.model.RemoteModelManager;
+          import com.google.mlkit.vision.digitalink.DigitalInkRecognition;
+          import com.google.mlkit.vision.digitalink.DigitalInkRecognitionModel;
+          import com.google.mlkit.vision.digitalink.DigitalInkRecognitionModelIdentifier;
+          import com.google.mlkit.vision.digitalink.DigitalInkRecognizer;
+          import com.google.mlkit.vision.digitalink.DigitalInkRecognizerOptions;
+          import com.google.mlkit.vision.digitalink.Ink;
+
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.Locale;
+
+          public class MainActivity extends AppCompatActivity {
+
+              private static final int REQ_CODE_SPEECH = 100;
+              private BlackboardView boardView;
+              private DigitalInkRecognizer recognizer;
+              private boolean isModelDownloaded = false;
+              private Button statusBtn;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                      ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO}, 1);
+                  }
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setBackgroundColor(Color.parseColor("#0F291E"));
+
+                  // Top Control Bar
+                  HorizontalScrollView topScroll = new HorizontalScrollView(this);
+                  topScroll.setBackgroundColor(Color.parseColor("#1B3B2B"));
+                  LinearLayout topBar = new LinearLayout(this);
+                  topBar.setOrientation(LinearLayout.HORIZONTAL);
+                  topBar.setPadding(12, 8, 12, 8);
+                  topBar.setGravity(Gravity.CENTER_VERTICAL);
+
+                  boardView = new BlackboardView(this);
+
+                  Button btnSmartWrite = makeBtn("✍️ Smart Write (Auto Text)", "#2E7D32");
+                  Button btnFreeDraw = makeBtn("🎨 Free Draw (Diagrams)", "#1565C0");
+                  Button btnErase = makeBtn("🧹 Touch Eraser", "#C62828");
+                  Button btnVoice = makeBtn("🎤 Voice (English)", "#6A1B9A");
+                  Button btnKeyboard = makeBtn("⌨️ Type Eq", "#00838F");
+                  Button btnColor = makeBtn("🟡 Chalk Color", "#F9A825");
+                  Button btnBg = makeBtn("⬛ Board BG", "#37474F");
+                  Button btnClear = makeBtn("🗑️ Clear All", "#4E342E");
+                  statusBtn = makeBtn("⏳ AI Loading...", "#455A64");
+
+                  btnSmartWrite.setOnClickListener(v -> {
+                      boardView.setMode(BlackboardView.MODE_SMART_WRITE);
+                      toast("Smart Write: Write on board -> Converts to Printed Text & Equations!");
+                  });
+
+                  btnFreeDraw.setOnClickListener(v -> {
+                      boardView.setMode(BlackboardView.MODE_FREE_DRAW);
+                      toast("Free Draw Mode: Draw geometry/physics diagrams freely");
+                  });
+
+                  btnErase.setOnClickListener(v -> {
+                      boardView.setMode(BlackboardView.MODE_ERASE);
+                      toast("Touch Eraser: Rub with finger over any text or line to erase!");
+                  });
+
+                  btnVoice.setOnClickListener(v -> startVoiceInput());
+                  btnKeyboard.setOnClickListener(v -> showTypeDialog());
+                  btnColor.setOnClickListener(v -> boardView.cycleChalkColor());
+                  btnBg.setOnClickListener(v -> boardView.cycleBoardBg());
+                  btnClear.setOnClickListener(v -> boardView.clearAll());
+
+                  topBar.addView(btnSmartWrite);
+                  topBar.addView(btnFreeDraw);
+                  topBar.addView(btnErase);
+                  topBar.addView(btnVoice);
+                  topBar.addView(btnKeyboard);
+                  topBar.addView(btnColor);
+                  topBar.addView(btnBg);
+                  topBar.addView(btnClear);
+                  topBar.addView(statusBtn);
+                  topScroll.addView(topBar);
+
+                  // Bottom Math / Science Quick Symbol Bar
+                  HorizontalScrollView bottomScroll = new HorizontalScrollView(this);
+                  bottomScroll.setBackgroundColor(Color.parseColor("#142E22"));
+                  LinearLayout symbolBar = new LinearLayout(this);
+                  symbolBar.setOrientation(LinearLayout.HORIZONTAL);
+                  symbolBar.setPadding(10, 6, 10, 6);
+
+                  String[] symbols = {
+                      "+", "−", "×", "÷", "=", "≠", "≈", "±",
+                      "²", "³", "⁴", "₁", "₂", "₃", "₄",
+                      "√", "∛", "π", "θ", "Δ", "λ", "μ", "Ω", "α", "β", "γ",
+                      "→", "⇌", "↑", "↓", "∫", "∑", "∞", "°", "∠", "⊥", "∥", "∴",
+                      "H₂O", "CO₂", "H₂SO₄", "NaOH", "HCl", "O₂"
+                  };
+
+                  for (String sym : symbols) {
+                      Button b = new Button(this);
+                      b.setText(sym);
+                      b.setTextColor(Color.WHITE);
+                      b.setTextSize(16f);
+                      b.setTypeface(Typeface.SERIF, Typeface.BOLD);
+                      b.setBackgroundColor(Color.parseColor("#264D3B"));
+                      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                              LinearLayout.LayoutParams.WRAP_CONTENT,
+                              LinearLayout.LayoutParams.WRAP_CONTENT);
+                      lp.setMargins(6, 2, 6, 2);
+                      b.setLayoutParams(lp);
+                      b.setOnClickListener(v -> boardView.appendSymbolToLastOrCenter(sym));
+                      symbolBar.addView(b);
+                  }
+                  bottomScroll.addView(symbolBar);
+
+                  root.addView(topScroll, new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+                  root.addView(boardView, new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+                  root.addView(bottomScroll, new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+                  setContentView(root);
+                  setupHandwritingRecognition();
+              }
+
+              private Button makeBtn(String text, String bgHex) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setTextColor(Color.WHITE);
+                  b.setTextSize(13f);
+                  b.setAllCaps(false);
+                  b.setBackgroundColor(Color.parseColor(bgHex));
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.WRAP_CONTENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT);
+                  lp.setMargins(8, 2, 8, 2);
+                  b.setPadding(24, 10, 24, 10);
+                  b.setLayoutParams(lp);
+                  return b;
+              }
+
+              private void setupHandwritingRecognition() {
+                  try {
+                      DigitalInkRecognitionModelIdentifier modelIdentifier =
+                              DigitalInkRecognitionModelIdentifier.fromLanguageTag("en-US");
+                      if (modelIdentifier == null) return;
+
+                      DigitalInkRecognitionModel model =
+                              DigitalInkRecognitionModel.builder(modelIdentifier).build();
+                      RemoteModelManager remoteModelManager = RemoteModelManager.getInstance();
+
+                      remoteModelManager.isModelDownloaded(model).addOnSuccessListener(downloaded -> {
+                          if (downloaded) {
+                              initRecognizer(model);
+                          } else {
+                              statusBtn.setText("⬇️ Downloading AI (15MB)...");
+                              remoteModelManager.download(model, new DownloadConditions.Builder().build())
+                                      .addOnSuccessListener(aVoid -> initRecognizer(model))
+                                      .addOnFailureListener(e -> {
+                                          statusBtn.setText("⚠️ Turn ON Internet once");
+                                          toast("Please keep internet ON for 1 minute to download Handwriting AI model.");
+                                      });
+                          }
+                      });
+                  } catch (Exception e) {
+                      statusBtn.setText("⚠️ AI Init Error");
+                  }
+              }
+
+              private void initRecognizer(DigitalInkRecognitionModel model) {
+                  recognizer = DigitalInkRecognition.getClient(
+                          DigitalInkRecognizerOptions.builder(model).build());
+                  isModelDownloaded = true;
+                  statusBtn.setText("✅ AI Ready");
+                  statusBtn.setBackgroundColor(Color.parseColor("#2E7D32"));
+              }
+
+              private void startVoiceInput() {
+                  Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+                  intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+                  intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN");
+                  intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak English / Science / Math Equations...");
+                  try {
+                      startActivityForResult(intent, REQ_CODE_SPEECH);
+                  } catch (ActivityNotFoundException a) {
+                      toast("Voice recognition not supported on this device.");
+                  }
+              }
+
+              @Override
+              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  super.onActivityResult(requestCode, resultCode, data);
+                  if (requestCode == REQ_CODE_SPEECH && resultCode == RESULT_OK && data != null) {
+                      ArrayList<String> result = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
+                      if (result != null && !result.isEmpty()) {
+                          String spoken = formatScienceAndMath(result.get(0));
+                          boardView.addVoiceTextElement(spoken);
+                      }
+                  }
+              }
+
+              private void showTypeDialog() {
+                  EditText input = new EditText(this);
+                  input.setHint("e.g. 2H2 + O2 -> 2H2O or x^2 + y^2 = r^2");
+                  input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+                  new AlertDialog.Builder(this)
+                          .setTitle("Enter Text / Formula (Exact Case Preserved)")
+                          .setView(input)
+                          .setPositiveButton("Add to Board", (d, w) -> {
+                              String txt = input.getText().toString();
+                              if (!txt.isEmpty()) {
+                                  boardView.addVoiceTextElement(formatScienceAndMath(txt));
+                              }
+                          })
+                          .setNegativeButton("Cancel", null)
+                          .show();
+              }
+
+              public static String formatScienceAndMath(String raw) {
+                  if (raw == null) return "";
+                  String s = raw;
+
+                  // Spoken math/chemistry replacements
+                  s = s.replaceAll("(?i)\\bgives rise to\\b", " → ");
+                  s = s.replaceAll("(?i)\\breacts with\\b", " + ");
+                  s = s.replaceAll("(?i)\\bequals to\\b", " = ");
+                  s = s.replaceAll("(?i)\\bis equal to\\b", " = ");
+                  s = s.replaceAll("(?i)\\bplus\\b", " + ");
+                  s = s.replaceAll("(?i)\\bminus\\b", " − ");
+                  s = s.replaceAll("(?i)\\bdivided by\\b", " ÷ ");
+                  s = s.replaceAll("(?i)\\bmultiplied by\\b", " × ");
+                  s = s.replaceAll("(?i)\\bsquare root of\\b", "√");
+                  s = s.replaceAll("(?i)\\balpha\\b", "α");
+                  s = s.replaceAll("(?i)\\bbeta\\b", "β");
+                  s = s.replaceAll("(?i)\\bgamma\\b", "γ");
+                  s = s.replaceAll("(?i)\\btheta\\b", "θ");
+                  s = s.replaceAll("(?i)\\bdelta\\b", "Δ");
+                  s = s.replaceAll("(?i)\\bpi\\b", "π");
+
+                  // Arrows & symbols
+                  s = s.replace("->", " → ")
+                       .replace("=>", " ⇒ ")
+                       .replace("<->", " ⇌ ")
+                       .replace(">=", " ≥ ")
+                       .replace("<=", " ≤ ")
+                       .replace("!=", " ≠ ")
+                       .replace("+-", " ± ")
+                       .replace("sqrt", "√");
+
+                  // Superscripts (e.g. ^2, ^3, ^n, ^+, ^-)
+                  s = s.replace("^0", "⁰").replace("^1", "¹").replace("^2", "²")
+                       .replace("^3", "³").replace("^4", "⁴").replace("^5", "⁵")
+                       .replace("^6", "⁶").replace("^7", "⁷").replace("^8", "⁸")
+                       .replace("^9", "⁹").replace("^+", "⁺").replace("^-", "⁻")
+                       .replace("^n", "ⁿ");
+
+                  // Chemical Subscripts: Letter followed by digit (e.g. H2O -> H₂O, CO2 -> CO₂, SO4 -> SO₄)
+                  StringBuilder sb = new StringBuilder();
+                  for (int i = 0; i < s.length(); i++) {
+                      char c = s.charAt(i);
+                      if (Character.isDigit(c) && i > 0) {
+                          char prev = s.charAt(i - 1);
+                          if (Character.isLetter(prev) || prev == ')' || prev == '₂' || prev == '₃' || prev == '₄') {
+                              sb.append(toSubscript(c));
+                              continue;
+                          }
+                      }
+                      sb.append(c);
+                  }
+                  return sb.toString();
+              }
+
+              private static char toSubscript(char digit) {
+                  switch (digit) {
+                      case '0': return '₀';
+                      case '1': return '₁';
+                      case '2': return '₂';
+                      case '3': return '₃';
+                      case '4': return '₄';
+                      case '5': return '₅';
+                      case '6': return '₆';
+                      case '7': return '₇';
+                      case '8': return '₈';
+                      case '9': return '₉';
+                      default: return digit;
+                  }
+              }
+
+              private void toast(String msg) {
+                  Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
+              }
+
+              // Custom Blackboard View
+              class BlackboardView extends View {
+                  static final int MODE_SMART_WRITE = 0;
+                  static final int MODE_FREE_DRAW = 1;
+                  static final int MODE_ERASE = 2;
+
+                  private int currentMode = MODE_SMART_WRITE;
+
+                  private final String[] bgColors = {"#0F291E", "#121212", "#102542", "#2B1B17"};
+                  private int bgIndex = 0;
+
+                  private final int[] chalkColors = {
+                      Color.WHITE,
+                      Color.parseColor("#FFEB3B"), // Yellow
+                      Color.parseColor("#4FC3F7"), // Cyan
+                      Color.parseColor("#FF8A65"), // Orange
+                      Color.parseColor("#AED581")  // Light Green
+                  };
+                  private int colorIndex = 0;
+
+                  private Paint strokePaint;
+                  private Paint textPaint;
+                  private Paint eraserPreviewPaint;
+
+                  private List<BoardTextItem> textItems = new ArrayList<>();
+                  private List<FreePathItem> freePaths = new ArrayList<>();
+
+                  // Active handwriting ink collection
+                  private List<Path> currentHandwritingPaths = new ArrayList<>();
+                  private Path activePath;
+                  private Ink.Builder inkBuilder = Ink.builder();
+                  private Ink.Stroke.Builder strokeBuilder;
+                  private RectF currentWritingBounds = new RectF();
+
+                  private float eraserX = -100, eraserY = -100;
+                  private boolean showEraserCircle = false;
+                  private BoardTextItem draggingTextItem = null;
+                  private float dragOffsetX, dragOffsetY;
+
+                  private Handler convertHandler = new Handler(Looper.getMainLooper());
+                  private Runnable convertRunnable = this::recognizeAndConvertHandwriting;
+
+                  private float nextVoiceY = 140f;
+
+                  public BlackboardView(Context context) {
+                      super(context);
+                      setBackgroundColor(Color.parseColor(bgColors[bgIndex]));
+
+                      strokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                      strokePaint.setColor(chalkColors[colorIndex]);
+                      strokePaint.setStyle(Paint.Style.STROKE);
+                      strokePaint.setStrokeWidth(7f);
+                      strokePaint.setStrokeCap(Paint.Cap.ROUND);
+                      strokePaint.setStrokeJoin(Paint.Join.ROUND);
+
+                      textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                      textPaint.setColor(chalkColors[colorIndex]);
+                      textPaint.setTextSize(68f);
+                      textPaint.setTypeface(Typeface.create(Typeface.SERIF, Typeface.BOLD));
+
+                      eraserPreviewPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                      eraserPreviewPaint.setColor(Color.RED);
+                      eraserPreviewPaint.setStyle(Paint.Style.STROKE);
+                      eraserPreviewPaint.setStrokeWidth(4f);
+                      eraserPreviewPaint.setPathEffect(new DashPathEffect(new float[]{10, 10}, 0));
+                  }
+
+                  public void setMode(int mode) {
+                      if (currentMode == MODE_SMART_WRITE && !currentHandwritingPaths.isEmpty()) {
+                          convertHandler.removeCallbacks(convertRunnable);
+                          recognizeAndConvertHandwriting();
+                      }
+                      currentMode = mode;
+                      invalidate();
+                  }
+
+                  public void cycleChalkColor() {
+                      colorIndex = (colorIndex + 1) % chalkColors.length;
+                      strokePaint.setColor(chalkColors[colorIndex]);
+                      textPaint.setColor(chalkColors[colorIndex]);
+                      toast("Chalk Color Changed");
+                  }
+
+                  public void cycleBoardBg() {
+                      bgIndex = (bgIndex + 1) % bgColors.length;
+                      setBackgroundColor(Color.parseColor(bgColors[bgIndex]));
+                      invalidate();
+                  }
+
+                  public void clearAll() {
+                      convertHandler.removeCallbacks(convertRunnable);
+                      textItems.clear();
+                      freePaths.clear();
+                      currentHandwritingPaths.clear();
+                      inkBuilder = Ink.builder();
+                       currentWritingBounds.setEmpty();
+                      nextVoiceY = 140f;
+                      invalidate();
+                  }
+
+                  public void addVoiceTextElement(String text) {
+                      if (nextVoiceY > getHeight() - 100 && getHeight() > 0) {
+                          nextVoiceY = 140f;
+                      }
+                      textItems.add(new BoardTextItem(text, 80f, nextVoiceY, chalkColors[colorIndex]));
+                      nextVoiceY += 100f;
+                      invalidate();
+                  }
+
+                  public void appendSymbolToLastOrCenter(String sym) {
+                      if (!textItems.isEmpty()) {
+                          BoardTextItem last = textItems.get(textItems.size() - 1);
+                          last.text = last.text + sym;
+                      } else {
+                          addVoiceTextElement(sym);
+                      }
+                      invalidate();
+                  }
+
+                  @Override
+                  protected void onDraw(Canvas canvas) {
+                      super.onDraw(canvas);
+
+                      // Draw Freehand Diagrams
+                      for (FreePathItem item : freePaths) {
+                          strokePaint.setColor(item.color);
+                          canvas.drawPath(item.path, strokePaint);
+                      }
+
+                      // Draw Converted Beautiful Math/Science Text
+                      for (BoardTextItem item : textItems) {
+                          textPaint.setColor(item.color);
+                          canvas.drawText(item.text, item.x, item.y, textPaint);
+                      }
+
+                      // Draw Active Unconverted Handwriting Strokes
+                      strokePaint.setColor(chalkColors[colorIndex]);
+                      for (Path p : currentHandwritingPaths) {
+                          canvas.drawPath(p, strokePaint);
+                      }
+
+                      if (showEraserCircle && currentMode == MODE_ERASE) {
+                          canvas.drawCircle(eraserX, eraserY, 55f, eraserPreviewPaint);
+                      }
+                  }
+
+                  @Override
+                  public boolean onTouchEvent(MotionEvent event) {
+                      float x = event.getX();
+                      float y = event.getY();
+                      long t = System.currentTimeMillis();
+
+                      switch (currentMode) {
+                          case MODE_ERASE:
+                              handleEraserTouch(event, x, y);
+                              return true;
+
+                          case MODE_FREE_DRAW:
+                              handleFreeDrawTouch(event, x, y);
+                              return true;
+
+                          case MODE_SMART_WRITE:
+                              handleSmartWriteTouch(event, x, y, t);
+                              return true;
+                      }
+                      return true;
+                  }
+
+                  private void handleEraserTouch(MotionEvent event, float x, float y) {
+                      eraserX = x;
+                      eraserY = y;
+                      if (event.getAction() == MotionEvent.ACTION_DOWN || event.getAction() == MotionEvent.ACTION_MOVE) {
+                          showEraserCircle = true;
+                          float radius = 65f;
+
+                          // Erase printed text items touched by finger
+                          for (int i = textItems.size() - 1; i >= 0; i--) {
+                              BoardTextItem item = textItems.get(i);
+                              float width = textPaint.measureText(item.text);
+                              RectF box = new RectF(item.x - 20, item.y - 75, item.x + width + 20, item.y + 25);
+                              if (box.intersects(x - radius, y - radius, x + radius, y + radius)) {
+                                  textItems.remove(i);
+                              }
+                          }
+
+                          // Erase freehand diagram strokes touched by finger
+                          for (int i = freePaths.size() - 1; i >= 0; i--) {
+                              FreePathItem fp = freePaths.get(i);
+                              if (fp.bounds.intersects(x - radius, y - radius, x + radius, y + radius)) {
+                                  freePaths.remove(i);
+                              }
+                          }
+                          invalidate();
+                      } else if (event.getAction() == MotionEvent.ACTION_UP) {
+                          showEraserCircle = false;
+                          invalidate();
+                      }
+                  }
+
+                  private void handleFreeDrawTouch(MotionEvent event, float x, float y) {
+                      if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                          activePath = new Path();
+                          activePath.moveTo(x, y);
+                          FreePathItem item = new FreePathItem(activePath, chalkColors[colorIndex]);
+                          item.bounds.union(x, y);
+                          freePaths.add(item);
+                      } else if (event.getAction() == MotionEvent.ACTION_MOVE && activePath != null) {
+                          activePath.lineTo(x, y);
+                          if (!freePaths.isEmpty()) {
+                              freePaths.get(freePaths.size() - 1).bounds.union(x, y);
+                          }
+                      }
+                      invalidate();
+                  }
+
+                  private void handleSmartWriteTouch(MotionEvent event, float x, float y, long t) {
+                      if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                          // Check if user is dragging an already converted text item
+                          if (currentHandwritingPaths.isEmpty()) {
+                              for (int i = textItems.size() - 1; i >= 0; i--) {
+                                  BoardTextItem item = textItems.get(i);
+                                  float w = textPaint.measureText(item.text);
+                                  RectF box = new RectF(item.x, item.y - 70, item.x + w, item.y + 20);
+                                  if (box.contains(x, y)) {
+                                      draggingTextItem = item;
+                                      dragOffsetX = x - item.x;
+                                      dragOffsetY = y - item.y;
+                                      return;
+                                  }
+                              }
+                          }
+
+                          convertHandler.removeCallbacks(convertRunnable);
+                          activePath = new Path();
+                          activePath.moveTo(x, y);
+                          currentHandwritingPaths.add(activePath);
+
+                          strokeBuilder = Ink.Stroke.builder();
+                          strokeBuilder.addPoint(Ink.Point.create(x, y, t));
+
+                          if (currentWritingBounds.isEmpty()) {
+                              currentWritingBounds.set(x, y, x, y);
+                          } else {
+                              currentWritingBounds.union(x, y);
+                          }
+                          invalidate();
+
+                      } else if (event.getAction() == MotionEvent.ACTION_MOVE) {
+                          if (draggingTextItem != null) {
+                              draggingTextItem.x = x - dragOffsetX;
+                              draggingTextItem.y = y - dragOffsetY;
+                              invalidate();
+                              return;
+                          }
+                          if (activePath != null && strokeBuilder != null) {
+                              activePath.lineTo(x, y);
+                              strokeBuilder.addPoint(Ink.Point.create(x, y, t));
+                              currentWritingBounds.union(x, y);
+                              invalidate();
+                          }
+
+                      } else if (event.getAction() == MotionEvent.ACTION_UP) {
+                          if (draggingTextItem != null) {
+                              draggingTextItem = null;
+                              return;
+                          }
+                          if (strokeBuilder != null) {
+                              strokeBuilder.addPoint(Ink.Point.create(x, y, t));
+                              inkBuilder.addStroke(strokeBuilder.build());
+                              strokeBuilder = null;
+                          }
+                          // Wait 1.1 seconds after lifting finger to convert handwriting into printed text
+                          convertHandler.postDelayed(convertRunnable, 1100);
+                      }
+                  }
+
+                  private void recognizeAndConvertHandwriting() {
+                      if (currentHandwritingPaths.isEmpty()) return;
+
+                      final Ink ink = inkBuilder.build();
+                      final float targetX = Math.max(40f, currentWritingBounds.left);
+                      final float targetY = Math.max(90f, currentWritingBounds.centerY() + 20f);
+                      final int targetColor = chalkColors[colorIndex];
+
+                      if (!isModelDownloaded || recognizer == null) {
+                          // Keep as drawing if model is still downloading
+                          for (Path p : currentHandwritingPaths) {
+                              FreePathItem fp = new FreePathItem(p, targetColor);
+                              fp.bounds.set(currentWritingBounds);
+                              freePaths.add(fp);
+                          }
+                          resetCurrentInk();
+                          invalidate();
+                          return;
+                      }
+
+                      recognizer.recognize(ink)
+                              .addOnSuccessListener(result -> {
+                                  if (!result.getCandidates().isEmpty()) {
+                                      // Exact Case-Sensitive match from Google ML Kit
+                                      String rawText = result.getCandidates().get(0).getText();
+                                      String formatted = formatScienceAndMath(rawText);
+                                      textItems.add(new BoardTextItem(formatted, targetX, targetY, targetColor));
+                                  }
+                                  resetCurrentInk();
+                                  invalidate();
+                              })
+                              .addOnFailureListener(e -> {
+                                  resetCurrentInk();
+                                  invalidate();
+                              });
+                  }
+
+                  private void resetCurrentInk() {
+                      currentHandwritingPaths.clear();
+                      inkBuilder = Ink.builder();
+                      currentWritingBounds.setEmpty();
+                  }
+              }
+
+              static class BoardTextItem {
+                  String text;
+                  float x, y;
+                  int color;
+
+                  BoardTextItem(String text, float x, float y, int color) {
+                      this.text = text;
+                      this.x = x;
+                      this.y = y;
+                      this.color = color;
+                  }
+              }
+
+              static class FreePathItem {
+                  Path path;
+                  int color;
+                  RectF bounds = new RectF();
+
+                  FreePathItem(Path path, int color) {
+                      this.path = path;
+                      this.color = color;
+                  }
+              }
+          }
+          EOF
+
+      - name: Build Debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Upload APK as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Smart-Blackboard-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
